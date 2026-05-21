@@ -2,12 +2,9 @@ import math
 from dataclasses import dataclass
 from typing import Literal, Tuple
 
+# For Local Testing
 @dataclass
 class CodeMindConfig:
-    """
-    CodeMind Nano (300M) Configuration
-    Target: ~120M active parameters, 8 experts, 8K context.
-    """
     # ------------------ Global & Hardware ------------------
     max_batch_size: int = 4
     max_seq_len: int = 512        # 8K context for Phase 1

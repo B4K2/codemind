@@ -134,7 +134,7 @@ def main():
         print("\n🛑 Interrupted — saving emergency checkpoint...")
         save_checkpoint(model, optimizer, current_step,
                         tokens_seen=tokens_seen,
-                        save_dir="checkpoints/emergency")
+                        save_dir="checkpoints")
     except Exception:
         import traceback
         print("\n❌ CRASH:")
