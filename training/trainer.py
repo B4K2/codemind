@@ -52,7 +52,7 @@ def main():
     num_params = sum(p.numel() for p in model.parameters()) / 1e6
     print(f"Parameters: {num_params:.1f}M")
 
-    optimizer = setup_optimizer(model, muon_lr=0.02, adam_lr=3e-4)
+    optimizer = setup_optimizer(model, muon_lr=0.008, adam_lr=3e-4)
     scheduler = CodeMindLRScheduler(optimizer, warmup_steps=200, total_steps=MAX_STEPS)
 
     # ── Resume ────────────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ def main():
                 n_experts         = config.n_routed_experts,
                 lb_weight         = lb_weight,
                 z_weight          = 0.0001,
-                mtp_weight        = 0.1, 
+                mtp_weight        = 0.05, 
             )
 
             (loss / GRAD_ACCUM_STEPS).backward()
