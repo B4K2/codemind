@@ -55,7 +55,7 @@ class CodeMindDataset(IterableDataset):
         )
 
         # 5. Shuffle buffer (50,000 documents in RAM) to ensure good randomization
-        self.mixed_dataset = self.mixed_dataset.shuffle(buffer_size=50000, seed=42)
+        self.mixed_dataset = self.mixed_dataset.shuffle(buffer_size=100000, seed=42)
 
     def _process_stream(self):
         """Generator that pulls text, applies FIM to code, and tokenizes."""

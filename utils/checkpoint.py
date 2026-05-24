@@ -1,8 +1,11 @@
 import os
+import shutil
 import torch
 from safetensors.torch import save_file, load_file
 
-def save_checkpoint(model, optimizer, step, tokens_seen=0, save_dir="checkpoints"):
+
+def save_checkpoint(model, optimizer, step, tokens_seen=0,
+                    save_dir="checkpoints", keep_last=3):
     os.makedirs(save_dir, exist_ok=True)
     path = os.path.join(save_dir, f"step_{step:06d}")
     os.makedirs(path, exist_ok=True)
@@ -16,6 +19,16 @@ def save_checkpoint(model, optimizer, step, tokens_seen=0, save_dir="checkpoints
         "step":        step,
         "tokens_seen": tokens_seen,
     }, os.path.join(path, "optimizer.pt"))
+
+    # ── Auto-delete old checkpoints ───────────────────────────────────────────
+    all_ckpts = sorted([
+        d for d in os.listdir(save_dir)
+        if d.startswith("step_") and os.path.isdir(os.path.join(save_dir, d))
+    ])
+    while len(all_ckpts) > keep_last:
+        old_path = os.path.join(save_dir, all_ckpts.pop(0))
+        shutil.rmtree(old_path)
+        print(f"Deleted old checkpoint: {old_path}")
 
     print(f"Checkpoint saved at step {step} ({tokens_seen/1e6:.1f}M tokens) -> {path}")
 
@@ -38,9 +51,11 @@ def load_checkpoint(model, optimizer, save_dir="checkpoints", step=None):
     weights = load_file(os.path.join(path, "model.safetensors"))
     raw_model.load_state_dict(weights)
 
-    opt_state    = torch.load(os.path.join(path, "optimizer.pt"), map_location="cpu")
+    opt_state    = torch.load(os.path.join(path, "optimizer.pt"),
+                              map_location="cpu", weights_only=True)
     optimizer.load_state_dict(opt_state["optimizer"])
     resumed_step = opt_state["step"]
     tokens_seen  = opt_state.get("tokens_seen", 0)
 
+    print(f"Resumed from step {resumed_step} ({tokens_seen/1e6:.1f}M tokens)")
     return resumed_step, tokens_seen

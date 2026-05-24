@@ -11,82 +11,78 @@ class Expert(nn.Module):
     def __init__(self, config: CodeMindConfig):
         super().__init__()
         self.w_gate = nn.Linear(config.dim, config.moe_inter_dim, bias=False)
-        self.w_up = nn.Linear(config.dim, config.moe_inter_dim, bias=False)
+        self.w_up   = nn.Linear(config.dim, config.moe_inter_dim, bias=False)
         self.w_down = nn.Linear(config.moe_inter_dim, config.dim, bias=False)
 
-    def forward(self, x: torch.Tensor, weights: Optional[torch.Tensor] = None) -> torch.Tensor:
-        gate = F.silu(self.w_gate(x))
-        up = self.w_up(x)
-        out = self.w_down(gate * up)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.w_down(F.silu(self.w_gate(x)) * self.w_up(x))
 
-        if weights is not None:
-            return out * weights
-        return out
 
 class Gate(nn.Module):
     def __init__(self, config: CodeMindConfig):
         super().__init__()
-        self.n_routed_experts = config.n_routed_experts
+        self.n_routed_experts    = config.n_routed_experts
         self.n_activated_experts = config.n_activated_experts
         self.router = nn.Linear(config.dim, self.n_routed_experts, bias=False)
-        self.register_buffer(
-            "expert_bias",
-            torch.zeros(config.n_routed_experts)
-        )
+        nn.init.normal_(self.router.weight, std=0.01)  # small init → stable logits
+        self.register_buffer("expert_bias", torch.zeros(config.n_routed_experts))
 
     def forward(self, x: torch.Tensor):
-        logits = self.router(x)                                        # raw logits
-        scores = F.softmax(logits, dim=-1, dtype=torch.float32)
-        biased_scores = scores + self.expert_bias             # [N, E]
-        _, top_k_indices = torch.topk(biased_scores, self.n_activated_experts, dim=-1)
-        top_k_weights = scores.gather(1, top_k_indices)
+        logits  = self.router(x)                                    
+        scores  = F.softmax(logits, dim=-1, dtype=torch.float32)   
+
+        biased  = scores + self.expert_bias
+        _, top_k_indices = torch.topk(biased, self.n_activated_experts, dim=-1)
+
+        top_k_weights = scores.gather(1, top_k_indices)            
         top_k_weights = top_k_weights / top_k_weights.sum(dim=-1, keepdim=True)
+
         return top_k_weights.to(x.dtype), top_k_indices, logits
 
 
 class MoE(nn.Module):
     def __init__(self, config: CodeMindConfig):
         super().__init__()
-        self.n_routed_experts  = config.n_routed_experts
+        self.n_routed_experts    = config.n_routed_experts
         self.n_activated_experts = config.n_activated_experts
-        self.gate          = Gate(config)
+        self.gate           = Gate(config)
         self.routed_experts = nn.ModuleList([Expert(config) for _ in range(self.n_routed_experts)])
         self.shared_expert  = Expert(config)
 
     def forward(self, x: torch.Tensor):
         B, S, D = x.shape
-        x_flat  = x.view(-1, D)
+        N       = B * S
+        x_flat  = x.view(N, D)                                    
 
         routing_weights, expert_indices, router_logits = self.gate(x_flat)
 
-        final_output        = torch.zeros_like(x_flat)
-        flat_expert_indices = expert_indices.flatten()
-        flat_inputs         = x_flat.repeat_interleave(self.n_activated_experts, dim=0)
-        expert_counts       = torch.bincount(flat_expert_indices, minlength=self.n_routed_experts)
-        expert_inputs_split = torch.split(flat_inputs, expert_counts.tolist(), dim=0)
+        one_hot = F.one_hot(expert_indices, num_classes=self.n_routed_experts).to(x_flat.dtype)
 
-        expert_outputs_split = []
-        for i in range(self.n_routed_experts):
-            if expert_inputs_split[i].shape[0] > 0:
-                expert_outputs_split.append(self.routed_experts[i](expert_inputs_split[i]))
+        dispatch_weights = (routing_weights.unsqueeze(-1) * one_hot).sum(dim=1)
 
-        expert_outputs   = torch.cat(expert_outputs_split, dim=0)
-        weighted_outputs = expert_outputs * routing_weights.flatten().unsqueeze(1)
-        token_indices    = torch.arange(x_flat.size(0), device=x.device).repeat_interleave(self.n_activated_experts)
-        final_output.scatter_add_(0, token_indices.unsqueeze(1).expand_as(weighted_outputs), weighted_outputs)
-        final_output    += self.shared_expert(x_flat)
+        expert_outs = torch.stack(
+            [expert(x_flat) for expert in self.routed_experts],
+            dim=0
+        )
+        
+        routed_out = torch.einsum("ne, end -> nd", dispatch_weights, expert_outs)  
 
-        # if self.training:
-        #     with torch.no_grad():
-        #         usage = torch.bincount(
-        #             expert_indices.flatten(),
-        #             minlength=self.n_routed_experts
-        #         ).float()
-        #         usage = usage / usage.sum()                   
-        #         ideal = 1.0 / self.n_routed_experts
-        #         self.gate.expert_bias += 0.001 * (ideal - usage)
+        final_out = routed_out + self.shared_expert(x_flat)                        
 
-        return final_output.view(B, S, D), router_logits   
+        if self.training:
+            self._update_expert_bias(expert_indices)
+
+        return final_out.view(B, S, D), router_logits
+
+    @torch.no_grad()
+    def _update_expert_bias(self, expert_indices: torch.Tensor):
+        """Update expert bias outside the forward graph — never touches autograd."""
+        usage = expert_indices.flatten().bincount(
+            minlength=self.n_routed_experts
+        ).float()
+        usage = usage / usage.sum()
+        ideal = 1.0 / self.n_routed_experts
+        self.gate.expert_bias.add_(0.001 * (ideal - usage))
 
 # Quick local test
 if __name__ == "__main__":

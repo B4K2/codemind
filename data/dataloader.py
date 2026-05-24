@@ -9,7 +9,7 @@ def get_dataloader(config: CodeMindConfig, tokenizer: CodeMindTokenizer, skip_ba
         max_seq_len=config.max_seq_len
     )
     
-    loader = DataLoader(dataset, batch_size=config.max_batch_size, pin_memory=True, num_workers=2)
+    loader = DataLoader(dataset, batch_size=config.max_batch_size, pin_memory=True, num_workers=4)
     
     if skip_batches > 0:
         print(f"Skipping {skip_batches} batches to resume data position...")

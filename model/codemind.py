@@ -8,6 +8,7 @@ from model.components.norms import RMSNorm
 from model.components.rope import precompute_freqs_cis
 from model.components.attn_residuals import AttnResOperator
 from model.blocks.transformer_block import TransformerBlock
+from model.components.mtp import MTPHead
 
 from torch.utils.checkpoint import checkpoint
 
@@ -40,15 +41,20 @@ class CodeMindSLM(nn.Module):
         # Weight tying
         self.lm_head.weight = self.token_emb.weight
         
-        # Precompute RoPE frequencies and register as a buffer
+        self.mtp_heads = nn.ModuleList([
+            MTPHead(config, offset=i) for i in range(config.n_mtp_layers)
+        ])
+
+        for head in self.mtp_heads:
+            head.lm_head   = self.lm_head   
+            head.token_emb = self.token_emb 
+
         rope_freqs = precompute_freqs_cis(
-            config.rope_head_dim, config.max_seq_len + 10, config.original_seq_len, 
-            config.rope_theta, config.rope_factor, 
-            config.beta_fast, config.beta_slow
+            config.rope_head_dim, config.max_seq_len + 10,
+            config.original_seq_len, config.rope_theta,
+            config.rope_factor, config.beta_fast, config.beta_slow,
         )
         self.register_buffer("rope_freqs", rope_freqs, persistent=False)
-        
-        # Initialize weights
         self._init_weights()
 
     def _init_weights(self):
@@ -115,21 +121,22 @@ class CodeMindSLM(nn.Module):
         # Final hidden state = actual last layer output (not a block summary)
         return last_output, all_router_logits 
 
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+    def forward(self, tokens: torch.Tensor, return_mtp: bool = True) -> torch.Tensor:
         """
         Full forward pass from token IDs to logits.
         """
-        # 1. Get token embeddings
-        x = self.token_emb(tokens)
-        
-        # 2. Run through the transformer layers with Block AttnRes
+        x          = self.token_emb(tokens)
         h, all_router_logits = self._forward_block_attnres(x)
-        
-        # 3. Final normalization and language model head
-        h = self.final_norm(h)
-        logits = self.lm_head(h)
-        
-        return logits, all_router_logits 
+        h_norm     = self.final_norm(h)
+        logits     = self.lm_head(h_norm)                  # [B, S, V]
+
+        mtp_logits = []
+        if return_mtp and len(self.mtp_heads) > 0 and self.training:
+            rope_freqs = self.rope_freqs[:tokens.size(1)].to(x.device)
+            for head in self.mtp_heads:
+                mtp_logits.append(head(h, tokens, rope_freqs))  # [B, S, V]
+
+        return logits, all_router_logits, mtp_logits
 
 # Quick local test
 if __name__ == "__main__":

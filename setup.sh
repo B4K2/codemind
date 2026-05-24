@@ -56,10 +56,10 @@ if python3 -c "import torch; assert torch.cuda.is_available()" 2>/dev/null; then
     CUDA_VER=$(python3 -c "import torch; print(torch.version.cuda)")
     echo "PyTorch $TORCH_VER with CUDA $CUDA_VER already available ✅"
     # Still install into venv so imports work
-    uv pip install torch --index-url https://download.pytorch.org/whl/cu128 --quiet
+    uv pip install torch --index-url https://download.pytorch.org/whl/cu124 --quiet
 else
-    echo "Installing PyTorch with CUDA 12.8..."
-    uv pip install torch --index-url https://download.pytorch.org/whl/cu128
+    echo "Installing PyTorch with CUDA 12.4..."
+    uv pip install torch --index-url https://download.pytorch.org/whl/cu124
 fi
 
 # ── 6. Core dependencies ──────────────────────────────────────────────────────

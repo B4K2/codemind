@@ -3,6 +3,7 @@ import time
 import torch
 import wandb
 from tqdm import tqdm
+import argparse
 
 from config.model_config import CodeMindConfig
 from tokenizer.tokenizer import CodeMindTokenizer
@@ -15,20 +16,36 @@ from utils.checkpoint import save_checkpoint, load_checkpoint
 
 # trainer.py — full updated trainer with tokens_seen
 
-MAX_STEPS        = 10000
+MAX_STEPS        = 100000
 GRAD_ACCUM_STEPS = 2          # adjusted for cloud batch size
-LOG_FREQ         = 10
+LOG_FREQ         = 50
 SAVE_FREQ        = 500
-MAX_GRAD_NORM    = 1.0
+MAX_GRAD_NORM    = 0.5
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    return v.lower() in ("yes", "true", "t", "1")
 
 def main():
-    wandb.init(project="CodeMind-SLM", name="nano-a40-run1")
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--resume",
+        type=str2bool,
+        default=True,
+        help="Resume training from checkpoint (default: True)"
+    )
+
+    args = parser.parse_args()
+
+    wandb.init(project="CodeMind-SLM", name="1B-A40-run1") 
 
     config    = CodeMindConfig()
     tokenizer = CodeMindTokenizer()
     wandb.config.update(config.__dict__)
 
     print("Loading CodeMindSLM...")
+    torch.set_float32_matmul_precision('high')
     model = CodeMindSLM(config).to("cuda").to(torch.bfloat16)
     model.use_gradient_checkpointing = True
     model = torch.compile(model, mode="default")
@@ -39,8 +56,7 @@ def main():
     scheduler = CodeMindLRScheduler(optimizer, warmup_steps=200, total_steps=MAX_STEPS)
 
     # ── Resume ────────────────────────────────────────────────────────────────
-    RESUME = True
-    if RESUME and os.path.exists("checkpoints"):
+    if args.resume and os.path.exists("checkpoints"):
         current_step, tokens_seen = load_checkpoint(model, optimizer, save_dir="checkpoints")
         for _ in range(current_step):
             scheduler.step()
@@ -68,23 +84,26 @@ def main():
 
             inputs  = batch[:, :-1].to("cuda", non_blocking=True)
             targets = batch[:, 1:].to("cuda",  non_blocking=True)
-
-            logits, all_router_logits = model(inputs)
-            loss, ntp_loss, lb_loss, z_loss = calculate_ntp_loss(
+            
+            lb_warmup_steps = 500
+            lb_weight = min(0.03, 0.01 * (current_step / lb_warmup_steps))
+            logits, all_router_logits, mtp_logits = model(inputs, return_mtp=True)
+            loss, ntp_loss, lb_loss, z_loss, mtp_loss = calculate_ntp_loss(
                 logits, targets,
                 all_router_logits = all_router_logits,
+                mtp_logits        = mtp_logits,
                 n_experts         = config.n_routed_experts,
-                lb_weight         = 0.05,
-                z_weight          = 0.001,
+                lb_weight         = lb_weight,
+                z_weight          = 0.0001,
+                mtp_weight        = 0.1, 
             )
 
             (loss / GRAD_ACCUM_STEPS).backward()
             accumulated_loss += ntp_loss.item()
-
             tokens_seen += config.max_batch_size * config.max_seq_len
 
             if (batch_idx + 1) % GRAD_ACCUM_STEPS == 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
+                grad_norm  = torch.nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)  # ← after backward
                 current_lr = scheduler.get_last_lr()
                 optimizer.step()
                 scheduler.step()
@@ -117,9 +136,11 @@ def main():
                         "train/loss":        avg_loss,
                         "train/perplexity":  perplexity,
                         "train/tok_per_sec": tok_per_sec,
-                        "train/tokens_seen": tokens_seen,   
+                        "train/tokens_seen": tokens_seen,
+                        "train/mtp_loss":   mtp_loss.item() if mtp_loss else 0,    
                         "train/lb_loss":     lb_loss.item() if lb_loss is not None else 0,
                         "train/z_loss":      z_loss.item()  if z_loss  is not None else 0,
+                        "train/grad_norm":  grad_norm.item(), 
                         "train/muon_lr":     current_lr[0],
                         "step":              current_step,
                     })
