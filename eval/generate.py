@@ -231,7 +231,6 @@ def run_benchmark(model, tokenizer, max_new_tokens=150, **kwargs):
         output, tok_per_s = generate(
             model, tokenizer, prompt,
             max_new_tokens=max_new_tokens,
-            stream=True,
             **kwargs
         )
         print(f"\n[{tok_per_s:.0f} tok/s]")
@@ -255,6 +254,7 @@ def interactive_mode(model, tokenizer, **kwargs):
         "top_p":             0.92,
         "repetition_penalty": 1.1,
         **kwargs,
+        "stream":             True,
     }
 
     while True:

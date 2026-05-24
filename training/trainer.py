@@ -20,7 +20,7 @@ MAX_STEPS        = 100000
 GRAD_ACCUM_STEPS = 2          # adjusted for cloud batch size
 LOG_FREQ         = 50
 SAVE_FREQ        = 500
-MAX_GRAD_NORM    = 0.5
+MAX_GRAD_NORM    = 0.3
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -86,7 +86,8 @@ def main():
             targets = batch[:, 1:].to("cuda",  non_blocking=True)
             
             lb_warmup_steps = 500
-            lb_weight = min(0.03, 0.01 * (current_step / lb_warmup_steps))
+            # lb_weight = min(0.03, 0.01 * (current_step / lb_warmup_steps))
+            lb_weight = 0.0
             logits, all_router_logits, mtp_logits = model(inputs, return_mtp=True)
             loss, ntp_loss, lb_loss, z_loss, mtp_loss = calculate_ntp_loss(
                 logits, targets,
