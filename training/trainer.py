@@ -14,8 +14,6 @@ from training.scheduler import CodeMindLRScheduler
 from training.losses import calculate_ntp_loss
 from utils.checkpoint import save_checkpoint, load_checkpoint
 
-# trainer.py — full updated trainer with tokens_seen
-
 MAX_STEPS        = 100000
 GRAD_ACCUM_STEPS = 2          # adjusted for cloud batch size
 LOG_FREQ         = 50
@@ -38,11 +36,11 @@ def main():
 
     args = parser.parse_args()
 
-    wandb.init(project="CodeMind-SLM", name="1B-A40-run1") 
+    # wandb.init(project="CodeMind-SLM", name="1B-A40-run1") 
 
     config    = CodeMindConfig()
     tokenizer = CodeMindTokenizer()
-    wandb.config.update(config.__dict__)
+    # wandb.config.update(config.__dict__)
 
     print("Loading CodeMindSLM...")
     torch.set_float32_matmul_precision('high')
@@ -86,17 +84,17 @@ def main():
             targets = batch[:, 1:].to("cuda",  non_blocking=True)
             
             lb_warmup_steps = 500
-            # lb_weight = min(0.03, 0.01 * (current_step / lb_warmup_steps))
-            lb_weight = 0.0
-            logits, all_router_logits, mtp_logits = model(inputs, return_mtp=True)
+            lb_weight = min(0.01, 0.01 * (current_step / lb_warmup_steps))
+            logits, all_router_logits, all_lb_losses, all_expert_usages, mtp_logits = model(inputs, return_mtp=True)
             loss, ntp_loss, lb_loss, z_loss, mtp_loss = calculate_ntp_loss(
                 logits, targets,
                 all_router_logits = all_router_logits,
+                all_lb_losses     = all_lb_losses,
                 mtp_logits        = mtp_logits,
                 n_experts         = config.n_routed_experts,
                 lb_weight         = lb_weight,
                 z_weight          = 0.0001,
-                mtp_weight        = 0.05, 
+                mtp_weight        = 0.05,
             )
 
             (loss / GRAD_ACCUM_STEPS).backward()
@@ -125,32 +123,67 @@ def main():
                     else:
                         tok_str = f"{tokens_seen/1e9:.3f}B"
 
-                    print(
-                        f"Step {current_step:5d} | "
-                        f"Loss: {avg_loss:.4f} | "
-                        f"PPL: {perplexity:.1f} | "
-                        f"Tok/s: {tok_per_sec:,.0f} | "
-                        f"Tokens: {tok_str} | "       
-                        f"LR: {current_lr[0]:.5f}"
-                    )
-                    wandb.log({
-                        "train/loss":        avg_loss,
-                        "train/perplexity":  perplexity,
-                        "train/tok_per_sec": tok_per_sec,
-                        "train/tokens_seen": tokens_seen,
-                        "train/mtp_loss":   mtp_loss.item() if mtp_loss else 0,    
-                        "train/lb_loss":     lb_loss.item() if lb_loss is not None else 0,
-                        "train/z_loss":      z_loss.item()  if z_loss  is not None else 0,
-                        "train/grad_norm":  grad_norm.item(), 
-                        "train/muon_lr":     current_lr[0],
-                        "step":              current_step,
-                    })
+                    expert_log = {}
+                    if all_expert_usages:
+                        stacked = torch.stack(all_expert_usages)   
+                        avg_usage = stacked.mean(dim=0).cpu()      
+
+                        ideal = 1.0 / config.n_routed_experts
+
+                        for expert_idx, usage_val in enumerate(avg_usage.tolist()):
+                            expert_log[f"experts/expert_{expert_idx:02d}"] = usage_val
+
+                        max_usage  = avg_usage.max().item()
+                        min_usage  = avg_usage.min().item()
+                        usage_std  = avg_usage.std().item()
+
+                        collapse_ratio = max_usage / (min_usage + 1e-9)
+
+                        expert_log["experts/max_usage"]      = max_usage
+                        expert_log["experts/min_usage"]      = min_usage
+                        expert_log["experts/usage_std"]      = usage_std
+                        expert_log["experts/collapse_ratio"] = collapse_ratio
+                        expert_log["experts/ideal_usage"]    = ideal
+
+                        usage_str = " | ".join([
+                            f"E{i}:{v:.3f}" for i, v in enumerate(avg_usage.tolist())
+                        ])
+                        print(
+                            f"Step {current_step:5d} | "
+                            f"Loss: {avg_loss:.4f} | "
+                            f"PPL: {perplexity:.1f} | "
+                            f"Tok/s: {tok_per_sec:,.0f} | "
+                            f"Tokens: {tok_str} | "
+                            f"LR: {current_lr[0]:.5f} | "
+                            f"Collapse: {collapse_ratio:.1f}x"
+                        )
+                        print(f"         Experts: {usage_str}")
+                    else:
+                        print(
+                            f"Step {current_step:5d} | Loss: {avg_loss:.4f} | "
+                            f"PPL: {perplexity:.1f} | Tok/s: {tok_per_sec:,.0f} | "
+                            f"Tokens: {tok_str} | LR: {current_lr[0]:.5f}"
+                        )
+
+                    # wandb.log({
+                    #     "train/loss":          avg_loss,
+                    #     "train/perplexity":    perplexity,
+                    #     "train/tok_per_sec":   tok_per_sec,
+                    #     "train/tokens_seen":   tokens_seen,
+                    #     "train/mtp_loss":      mtp_loss.item()  if mtp_loss  else 0,
+                    #     "train/lb_loss":       lb_loss.item()   if lb_loss   else 0,
+                    #     "train/z_loss":        z_loss.item()    if z_loss    else 0,
+                    #     "train/grad_norm":     grad_norm.item(),
+                    #     "train/muon_lr":       current_lr[0],
+                    #     "step":                current_step,
+                    #     **expert_log,          
+                    # })
                     accumulated_loss = 0.0
                     t0 = t1
 
                 if current_step % SAVE_FREQ == 0:
                     save_checkpoint(model, optimizer, current_step,
-                                    tokens_seen=tokens_seen)  # ← save tokens too
+                                    tokens_seen=tokens_seen)  
 
     except KeyboardInterrupt:
         print("\n🛑 Interrupted — saving emergency checkpoint...")

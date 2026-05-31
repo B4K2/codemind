@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Try to import FlashAttention. If it fails, we fall back to PyTorch native SDPA.
 try:
     from flash_attn import flash_attn_func
     HAS_FLASH_ATTN = True
@@ -25,59 +24,44 @@ class MultiHeadLatentAttention(nn.Module):
         self.q_lora_rank = config.q_lora_rank
         self.kv_lora_rank = config.kv_lora_rank
         
-        # --- Query (Q) Latent Compression ---
         self.wq_a = nn.Linear(self.dim, config.q_lora_rank, bias=False)
         self.q_norm = RMSNorm(config.q_lora_rank, config.norm_eps)
-        # Q expands to both standard head_dim AND the rope_head_dim
         self.wq_b = nn.Linear(config.q_lora_rank, self.n_heads * (self.head_dim + self.rope_head_dim), bias=False)
         
-        # --- Key/Value (KV) Latent Compression ---
         self.wkv_a = nn.Linear(self.dim, config.kv_lora_rank + self.rope_head_dim, bias=False)
         self.kv_norm = RMSNorm(config.kv_lora_rank, config.norm_eps)
-        # KV is shared across all query heads (MQA style), saving massive memory
-        self.wkv_b = nn.Linear(config.kv_lora_rank, self.head_dim + self.head_dim, bias=False) # Outputs K and V
+        self.wkv_b = nn.Linear(config.kv_lora_rank, self.head_dim + self.head_dim, bias=False)
         
-        # --- Output Projection ---
         self.wo = nn.Linear(self.n_heads * self.head_dim, self.dim, bias=False)
 
     def forward(self, x: torch.Tensor, freqs_cis: torch.Tensor, use_sliding_window: bool = True) -> torch.Tensor:
         B, S, _ = x.shape
-        
-        # 1. Compute Query (Q)
+
         q_c = self.q_norm(self.wq_a(x))
         q = self.wq_b(q_c)
         q = q.view(B, S, self.n_heads, self.head_dim + self.rope_head_dim)
-        
-        # Split Q into content and RoPE parts
+
         q_content, q_rope = q.split([self.head_dim, self.rope_head_dim], dim=-1)
-        
-        # 2. Compute Latent KV and K_RoPE
+
         kv_c_and_rope = self.wkv_a(x)
         kv_c, k_rope = kv_c_and_rope.split([self.kv_lora_rank, self.rope_head_dim], dim=-1)
         kv_c = self.kv_norm(kv_c)
-        
-        # Expand latent KV to actual K and V (Shared across all heads -> 1 KV head)
+
         kv = self.wkv_b(kv_c)
         kv = kv.view(B, S, 1, self.head_dim * 2) # 1 KV head
         k_content, v = kv.split([self.head_dim, self.head_dim], dim=-1)
         k_rope = k_rope.view(B, S, 1, self.rope_head_dim)
-        
-        # 3. Apply RoPE (Rotary Position Embeddings) to the decoupled RoPE dimensions
+
         q_rope = apply_rotary_emb(q_rope, freqs_cis)
         k_rope = apply_rotary_emb(k_rope, freqs_cis)
+
+        q = torch.cat([q_content, q_rope], dim=-1) 
+        k = torch.cat([k_content, k_rope], dim=-1)
         
-        # 4. Concatenate content and RoPE dimensions back together
-        q = torch.cat([q_content, q_rope], dim=-1) # [B, S, H, head_dim + rope_head_dim]
-        k = torch.cat([k_content, k_rope], dim=-1) # [B, S, 1, head_dim + rope_head_dim]
-        
-        # 5. Core Attention Mechanism
         if HAS_FLASH_ATTN and x.is_cuda and x.dtype in [torch.float16, torch.bfloat16]:
-            # FlashAttention2 expects layout [B, S, H, D]
             window = (self.window_size, 0) if use_sliding_window else (-1, -1)
             o = flash_attn_func(q, k, v, dropout_p=0.0, causal=True, window_size=window)
         else:
-            # Native PyTorch SDPA Fallback
-            # Transpose to [B, H, S, D] for PyTorch SDPA
             q = q.transpose(1, 2)
             k = k.transpose(1, 2)
             v = v.transpose(1, 2)
@@ -89,12 +73,8 @@ class MultiHeadLatentAttention(nn.Module):
             else:
                 o = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=0.0)
                 
-            # Transpose back to [B, S, H, D]
             o = o.transpose(1, 2)
             
-        # 6. Output Projection
-        # Flatten heads [B, S, n_heads * head_dim]
-        # Notice we DO NOT include rope_head_dim in the output! It is discarded after attention.
         o = o.reshape(B, S, self.n_heads * self.head_dim)
         return self.wo(o)
 

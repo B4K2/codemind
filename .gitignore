@@ -14,3 +14,7 @@ wheels/
 wandb
 
 checkpoints
+
+checkpoints_sft
+
+mla/

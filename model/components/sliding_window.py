@@ -12,16 +12,12 @@ def get_sliding_window_mask(seq_len: int, window_size: int, device: torch.device
     Returns:
         Boolean or float mask tensor of shape (1, 1, seq_len, seq_len)
     """
-    # Create a standard causal mask (True for valid positions, False for future)
     causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device))
-    
-    # Create a window mask (False for positions that are TOO far in the past)
+
     window_mask = torch.triu(torch.ones(seq_len, seq_len, dtype=torch.bool, device=device), diagonal=-window_size + 1)
-    
-    # Combine them: Must be <= current token AND within window
+
     valid_mask = causal_mask & window_mask
     
-    # Convert to attention bias (-inf for masked, 0 for valid)
     bias = torch.zeros(seq_len, seq_len, dtype=dtype, device=device)
     bias.masked_fill_(~valid_mask, float("-inf"))
     

@@ -4,8 +4,8 @@ import torch.nn.functional as F
 from typing import Optional
 
 def calculate_mtp_loss(
-    mtp_logits: list,       # list of [B, S, V] tensors, one per head
-    targets: torch.Tensor,  # [B, S] — the ORIGINAL shifted targets (predicting t+1)
+    mtp_logits: list,       
+    targets: torch.Tensor,  
     mtp_weight: float = 0.1,
 ) -> torch.Tensor:
     """
@@ -67,22 +67,41 @@ def calculate_load_balance_loss(all_router_logits, n_experts):
     return total / len(all_router_logits)
 
 
-def calculate_ntp_loss(logits, targets, all_router_logits=None, mtp_logits=None,
-                       n_experts=6, lb_weight=0.05, z_weight=0.001, mtp_weight=0.1):
+def calculate_ntp_loss(
+    logits, targets,
+    all_router_logits=None,
+    all_lb_losses=None,       
+    mtp_logits=None,
+    n_experts=16,
+    lb_weight=0.01,           
+    z_weight=0.0001,
+    mtp_weight=0.05,
+):
     B, S, V  = logits.shape
     ntp_loss = chunked_cross_entropy(
         logits.contiguous().view(-1, V),
         targets.contiguous().view(-1),
     )
     total_loss = ntp_loss
-    lb_loss    = None    # ← initialise
-    z_loss     = None    # ← initialise
-    mtp_loss   = None    # ← initialise
+    lb_loss    = None
+    z_loss     = None
+    mtp_loss   = None
 
-    if all_router_logits:
-        lb_loss     = calculate_load_balance_loss(all_router_logits, n_experts)
-        z_loss      = calculate_z_loss(all_router_logits, z_weight)
-        total_loss  = total_loss + lb_weight * lb_loss + z_weight * z_loss
+    if all_lb_losses and lb_weight > 0:
+        valid_lb = [l for l in all_lb_losses if l is not None and l.requires_grad]
+        if valid_lb:
+            lb_loss    = torch.stack(valid_lb).mean()
+            total_loss = total_loss + lb_weight * lb_loss
+
+    if all_router_logits and z_weight > 0:
+        z_losses = []
+        for rl in all_router_logits:
+            if rl is not None:
+                clamped = rl.clamp(-10, 10)
+                z_losses.append(torch.logsumexp(clamped, dim=-1).pow(2).mean())
+        if z_losses:
+            z_loss     = torch.stack(z_losses).mean()
+            total_loss = total_loss + z_weight * z_loss
 
     if mtp_logits:
         mtp_loss   = calculate_mtp_loss(mtp_logits, targets, mtp_weight)

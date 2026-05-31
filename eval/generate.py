@@ -101,7 +101,7 @@ def generate(
         context = input_ids[:, -model.config.max_seq_len:]
 
         # Forward pass — return_mtp=False for speed during generation
-        logits, _, _ = model(context, return_mtp=False)
+        logits, *_ = model(context, return_mtp=False)
 
         # Take logits at the last position
         next_logits = logits[0, -1, :].float()  # [V]

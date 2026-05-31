@@ -47,7 +47,7 @@ class MTPHead(nn.Module):
         combined = torch.cat([self.hnorm(h), self.enorm(e)], dim=-1)  
         x = self.proj(combined)                            
 
-        x, _ = self.layer(x, rope_freqs, use_sliding_window=True)
+        x, *_ = self.layer(x, rope_freqs, use_sliding_window=True)
 
         logits = self.lm_head(self.norm(x))                
         return logits

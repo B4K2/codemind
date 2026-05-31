@@ -29,10 +29,10 @@ class TransformerBlock(nn.Module):
         )
         h = x + attn_output
         
-        ffn_output, router_logits = self.ffn(self.ffn_norm(h))
+        ffn_output, router_logits, lb_loss, expert_usage = self.ffn(self.ffn_norm(h))
         output = h + ffn_output
         
-        return output, router_logits
+        return output, router_logits, lb_loss, expert_usage
 
 # Quick local test
 if __name__ == "__main__":
